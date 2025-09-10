@@ -1,0 +1,25 @@
+{
+  "name": "grid-sdk-cli-tool",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@solana/web3.js": "^1.98.4",
+    "@sqds/grid": "^0.0.6",
+    "bs58": "^6.0.0",
+    "dotenv": "^17.2.2",
+    "inquirer": "^12.9.4"
+  },
+  "devDependencies": {
+    "@types/inquirer": "^9.0.9",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.2"
+  }
+}
