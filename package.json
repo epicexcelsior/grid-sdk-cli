@@ -1,14 +1,17 @@
 {
-  "name": "grid-sdk-cli-tool",
+  "name": "grid-sdk-cli",
   "version": "1.0.0",
-  "description": "",
+  "description": "A CLI tool for interacting with Grid Squads SDK - manage accounts, transfers, and transactions",
   "main": "index.js",
   "scripts": {
+    "start": "npx ts-node index.ts",
+    "dev": "npx ts-node index.ts --debug",
+    "build": "tsc",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": ["grid", "squads", "solana", "web3", "cli", "crypto", "blockchain"],
+  "author": "EpicExcelsior",
+  "license": "MIT",
   "type": "commonjs",
   "dependencies": {
     "@solana/web3.js": "^1.98.4",

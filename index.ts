@@ -9,13 +9,31 @@ import {
     clusterApiUrl,
     Keypair
 } from '@solana/web3.js';
-import bs58 from 'bs58';
+// Removed unused bs58 import
+import dotenv from 'dotenv';
+
+// Load environment variables
+dotenv.config();
 
 // --- Configuration ---
-// IMPORTANT: Replace these with your actual credentials.
-const GRID_API_KEY = "API KEY HERE";
-const GRID_ENVIRONMENT = 'sandbox' as GridEnvironment;
-const GRID_BASE_URL = 'https://grid.squads.xyz'; // SDK will append /api/grid/v1 automatically
+// Load configuration from environment variables
+const GRID_ENVIRONMENT = (process.env.GRID_ENVIRONMENT || 'sandbox') as GridEnvironment;
+const GRID_BASE_URL = process.env.GRID_BASE_URL || 'https://grid.squads.xyz';
+const SANDBOX_API_KEY = process.env.GRID_SANDBOX_API_KEY;
+const PRODUCTION_API_KEY = process.env.GRID_PRODUCTION_API_KEY;
+const DEBUG_MODE = process.env.DEBUG === 'true' || process.argv.includes('--debug') || process.argv.includes('-d');
+
+// Select the appropriate API key based on environment
+const GRID_API_KEY = GRID_ENVIRONMENT === 'production' ? PRODUCTION_API_KEY : SANDBOX_API_KEY;
+
+// Validate required environment variables
+if (!GRID_API_KEY) {
+    console.error('❌ ERROR: Missing API key for environment:', GRID_ENVIRONMENT.toUpperCase());
+    console.error('📝 Please set the following environment variable:');
+    console.error(`   ${GRID_ENVIRONMENT === 'production' ? 'GRID_PRODUCTION_API_KEY' : 'GRID_SANDBOX_API_KEY'}`);
+    console.error('💡 Copy .env.example to .env and add your API keys');
+    process.exit(1);
+}
 
 // NOTE: Grid accounts handle transaction fees internally - no external fee payer needed
 
@@ -24,23 +42,78 @@ let userSession: any = null; // To store user session data (the `data` property 
 let sessionSecrets: SessionSecrets | null = null; // To store session secrets separately
 let solanaConnection: Connection;
 
+// --- Utility Functions ---
+function debugLog(...args: any[]) {
+    if (DEBUG_MODE) {
+        console.log(...args);
+    }
+}
+
+function simpleLog(message: string) {
+    if (!DEBUG_MODE) {
+        console.log(message);
+    }
+}
+
+function getExplorerUrl(signature: string): string {
+    const cluster = GRID_ENVIRONMENT === 'sandbox' ? 'devnet' : 'mainnet-beta';
+    return `https://explorer.solana.com/tx/${signature}?cluster=${cluster}`;
+}
+
+function validateSolanaAddress(address: string): boolean {
+    try {
+        new PublicKey(address);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function validateAmount(amount: string, tokenType: 'USDC' | 'SOL'): { valid: boolean; error?: string } {
+    const num = parseFloat(amount);
+    
+    if (isNaN(num)) {
+        return { valid: false, error: 'Please enter a valid number' };
+    }
+    
+    if (num <= 0) {
+        return { valid: false, error: 'Amount must be greater than 0' };
+    }
+    
+    if (tokenType === 'USDC' && num > 1000000) {
+        return { valid: false, error: 'USDC amount too large (max: 1,000,000)' };
+    }
+    
+    if (tokenType === 'SOL' && num > 10000) {
+        return { valid: false, error: 'SOL amount too large (max: 10,000)' };
+    }
+    
+    return { valid: true };
+}
+
 // --- SDK Initialization ---
 function initializeGridClient() {
-    console.log('🔧 Grid SDK Configuration:');
-    console.log(`  Environment: ${GRID_ENVIRONMENT}`);
-    console.log(`  API Key: ${GRID_API_KEY.substring(0, 8)}...${GRID_API_KEY.substring(GRID_API_KEY.length - 8)}`);
-    console.log(`  Base URL: ${GRID_BASE_URL}`);
-    console.log(`  Solana Network: ${GRID_ENVIRONMENT === 'sandbox' ? 'devnet' : 'mainnet-beta'}`);
+    if (DEBUG_MODE) {
+        console.log('🔧 Grid SDK Configuration:');
+        console.log(`  Environment: ${GRID_ENVIRONMENT}`);
+        console.log(`  API Key: ${GRID_API_KEY!.substring(0, 8)}...${GRID_API_KEY!.substring(GRID_API_KEY!.length - 8)}`);
+        console.log(`  Base URL: ${GRID_BASE_URL}`);
+        console.log(`  Solana Network: ${GRID_ENVIRONMENT === 'sandbox' ? 'devnet' : 'mainnet-beta'}`);
+        console.log(`  Full API URL: ${GRID_BASE_URL}/api/grid/v1`);
+        console.log(`  Debug Mode: ${DEBUG_MODE ? 'ON' : 'OFF'}`);
+    } else {
+        console.log(`🚀 Grid CLI - ${GRID_ENVIRONMENT.toUpperCase()} Environment`);
+    }
     
     gridClient = new GridClient({
-        apiKey: GRID_API_KEY,
+        apiKey: GRID_API_KEY!,
         environment: GRID_ENVIRONMENT,
-        baseUrl: GRID_BASE_URL, // SDK appends /api/grid/v1 automatically
+        baseUrl: GRID_BASE_URL,
     });
     
     // Initialize Solana connection for arbitrary transactions
     const solanaNetwork = GRID_ENVIRONMENT === 'sandbox' ? clusterApiUrl('devnet') : clusterApiUrl('mainnet-beta');
-    console.log(`  Connecting to: ${solanaNetwork}`);
+    debugLog(`  Connecting to: ${solanaNetwork}`);
     
     solanaConnection = new Connection(
         solanaNetwork,
@@ -62,43 +135,70 @@ async function loginOrRegister() {
     ]);
 
     try {
-        console.log('Checking for existing user...');
+        simpleLog('📧 Checking for existing user...');
+        debugLog('Checking for existing user...');
         const authResponse = await gridClient.initAuth({ email });
         
         if (authResponse && authResponse.data) {
-            console.log('OTP sent to your email. Please check your inbox to log in.');
+            simpleLog('📬 OTP sent to your email. Please check your inbox.');
+            debugLog('OTP sent to your email. Please check your inbox to log in.');
             await verifyOtp(email, false);
         } else {
             throw new Error('Failed to initialize authentication');
         }
     } catch (error: any) {
+        if (DEBUG_MODE) {
+            console.log('🔍 Authentication Error Details:');
+            console.log(`  Error Message: ${error.message}`);
+            console.log(`  Error Code: ${error.code || 'N/A'}`);
+            console.log(`  Environment: ${GRID_ENVIRONMENT}`);
+        } else {
+            console.log(`❌ Authentication failed: ${error.message}`);
+        }
+        
         // Check if it's specifically a "user not found" error vs account already exists
         if (error.message && (error.message.includes('User not found') || error.message.includes('not found'))) {
-            console.log('User not found. Attempting to register...');
+            simpleLog('👤 User not found. Attempting to register...');
+            debugLog('User not found. Attempting to register...');
             try {
                 const accountResponse = await gridClient.createAccount({ type: 'email', email });
-                console.log('Account creation initiated. OTP sent to your email. Please check your inbox to complete registration.');
+                simpleLog('📬 Account creation initiated. OTP sent to your email.');
+                debugLog('Account creation initiated. OTP sent to your email. Please check your inbox to complete registration.');
                 await verifyOtp(email, true);
             } catch (registrationError: any) {
+                if (DEBUG_MODE) {
+                    console.log('🔍 Registration Error Details:');
+                    console.log(`  Error Message: ${registrationError.message}`);
+                    console.log(`  Error Code: ${registrationError.code || 'N/A'}`);
+                } else {
+                    console.log(`❌ Registration failed: ${registrationError.message}`);
+                }
+                
                 if (registrationError.message && registrationError.message.includes('already exists')) {
-                    console.log('Account already exists. Retrying login...');
+                    simpleLog('👤 Account already exists. Retrying login...');
+                    debugLog('Account already exists. Retrying login...');
                     // Account exists, try login again
                     try {
                         const retryAuthResponse = await gridClient.initAuth({ email });
                         if (retryAuthResponse && retryAuthResponse.data) {
-                            console.log('OTP sent to your email. Please check your inbox to log in.');
+                            simpleLog('📬 OTP sent to your email. Please check your inbox.');
+                            debugLog('OTP sent to your email. Please check your inbox to log in.');
                             await verifyOtp(email, false);
                         }
-                    } catch (retryError) {
-                        console.error('Login retry failed:', retryError);
+                    } catch (retryError: any) {
+                        console.error('❌ Login retry failed:', retryError.message);
                     }
                 } else {
-                    console.error('Registration failed:', registrationError);
+                    console.error('❌ Registration failed:', registrationError.message);
                 }
             }
         } else {
             // For other errors, might still be an existing user, try login flow
-            console.log('Authentication issue detected. This might be an existing account. Try entering OTP if you received one.');
+            simpleLog('🔄 This might be an existing account. Try entering OTP if you received one.');
+            debugLog('Authentication issue detected. This might be an existing account. Try entering OTP if you received one.');
+            if (DEBUG_MODE) {
+                console.log('If you did not receive an OTP, the error above shows what went wrong.');
+            }
             await verifyOtp(email, false);
         }
     }
@@ -148,11 +248,16 @@ async function verifyOtp(email: string, isNewUser: boolean) {
         
         if (authResponse) {
             userSession = authResponse;  // Store the entire response, not just data
-            console.log('User session created.');
-            console.log('Account address:', userSession.smart_account_address || userSession.address);
+            simpleLog('✅ Login successful!');
+            debugLog('User session created.');
+            const accountAddress = userSession.smart_account_address || userSession.address;
+            if (accountAddress) {
+                simpleLog(`🏦 Account: ${accountAddress}`);
+                debugLog('Account address:', accountAddress);
+            }
             
             // Log the structure to understand what we're getting
-            console.log('Session structure:', Object.keys(userSession));
+            debugLog('Session structure:', Object.keys(userSession));
         } else {
             throw new Error("Authentication completed, but no session data was returned.");
         }
@@ -220,42 +325,35 @@ async function transferTokens() {
         return;
     }
 
-    // First, get the token type
-    const { tokenType } = await inquirer.prompt([
-        {
-            type: 'list',
-            name: 'tokenType',
-            message: 'Which token would you like to send?',
-            choices: [
-                { name: 'USDC', value: 'usdc' },
-                { name: 'SOL', value: 'sol' },
-            ],
-        },
-    ]);
+    // Only support USDC transfers in this menu (SOL has its own arbitrary transaction menu)
+    const tokenType = 'usdc';
 
-    // Then get the recipient and amount with the correct token type in the message
+    // Get the recipient and amount for USDC transfer
     const { recipientAddress, amount } = await inquirer.prompt([
         {
             type: 'input',
             name: 'recipientAddress',
             message: 'Enter the recipient\'s Solana address:',
+            validate: (input: string) => {
+                if (!input.trim()) return 'Please enter a recipient address';
+                if (!validateSolanaAddress(input.trim())) return 'Please enter a valid Solana address';
+                return true;
+            }
         },
         {
             type: 'input',
             name: 'amount',
-            message: `Enter the amount of ${tokenType === 'usdc' ? 'USDC' : 'SOL'} to send:`,
+            message: 'Enter the amount of USDC to send:',
+            validate: (input: string) => {
+                if (!input.trim()) return 'Please enter an amount';
+                const validation = validateAmount(input.trim(), 'USDC');
+                return validation.valid ? true : validation.error!;
+            }
         },
     ]);
 
-    // Convert amount to base units based on token type
-    let amountInBaseUnits: number;
-    if (tokenType === 'usdc') {
-        amountInBaseUnits = Math.floor(parseFloat(amount) * 1_000_000); // USDC has 6 decimals
-    } else if (tokenType === 'sol') {
-        amountInBaseUnits = Math.floor(parseFloat(amount) * 1_000_000_000); // SOL has 9 decimals
-    } else {
-        throw new Error('Unsupported token type');
-    }
+    // Convert USDC amount to base units (6 decimals)
+    const amountInBaseUnits = Math.floor(parseFloat(amount) * 1_000_000);
 
     const accountAddress = userSession.smart_account_address || userSession.address;
 
@@ -265,42 +363,24 @@ async function transferTokens() {
     }
 
     try {
-        console.log(`Creating ${tokenType.toUpperCase()} payment intent...`);
+        simpleLog('💸 Creating USDC payment intent...');
+        debugLog('Creating USDC payment intent...');
         
-        let paymentIntentRequest;
-        if (tokenType === 'sol') {
-            // SOL transfers use 'solana' payment rail
-            paymentIntentRequest = {
-                amount: amountInBaseUnits.toString(),
-                grid_user_id: userSession.grid_user_id,
-                source: {
-                    address: accountAddress,
-                    currency: 'sol',
-                    payment_rail: 'solana',
-                },
-                destination: {
-                    address: recipientAddress,
-                    currency: 'sol',
-                    payment_rail: 'solana',
-                },
-            };
-        } else {
-            // USDC transfers use 'smart_account' payment rail
-            paymentIntentRequest = {
-                amount: amountInBaseUnits.toString(),
-                grid_user_id: userSession.grid_user_id,
-                source: {
-                    account: accountAddress,
-                    currency: 'usdc',
-                    payment_rail: 'smart_account',
-                },
-                destination: {
-                    address: recipientAddress,
-                    currency: 'usdc',
-                    payment_rail: 'smart_account',
-                },
-            };
-        }
+        // USDC transfers use 'smart_account' payment rail
+        const paymentIntentRequest = {
+            amount: amountInBaseUnits.toString(),
+            grid_user_id: userSession.grid_user_id,
+            source: {
+                account: accountAddress,
+                currency: 'usdc',
+                payment_rail: 'smart_account',
+            },
+            destination: {
+                address: recipientAddress,
+                currency: 'usdc',
+                payment_rail: 'smart_account',
+            },
+        };
         
         const paymentIntentResponse = await gridClient.createPaymentIntent(
             accountAddress,
@@ -313,38 +393,52 @@ async function transferTokens() {
         
         const transactionPayload = paymentIntentResponse.data.transactionPayload;
 
-        console.log('Payment intent created. Signing transaction...');
+        simpleLog('✍️ Signing USDC transaction...');
+        debugLog('Payment intent created. Signing transaction...');
         const signedPayload = await gridClient.sign({
             sessionSecrets,
             session: userSession.session || userSession.authentication,
             transactionPayload: transactionPayload,
         });
 
-        console.log('Transaction signed. Sending...');
+        simpleLog('📤 Sending USDC transaction...');
+        debugLog('Transaction signed. Sending...');
         const signatureResponse = await gridClient.send({
             signedTransactionPayload: signedPayload,
             address: accountAddress,
         });
 
         // Handle different response formats
+        let txSignature: string | null = null;
+        
         if (signatureResponse && signatureResponse.transaction_signature) {
-            console.log('✅ Transaction successful! Signature:', signatureResponse.transaction_signature);
-            console.log(`📊 Sent ${amount} ${tokenType.toUpperCase()} to ${recipientAddress}`);
-            if (signatureResponse.confirmed_at) {
-                console.log(`⏰ Confirmed at: ${signatureResponse.confirmed_at}`);
-            }
+            txSignature = signatureResponse.transaction_signature;
         } else if (signatureResponse && (signatureResponse.signature || signatureResponse.data?.signature)) {
-            const signature = signatureResponse.signature || signatureResponse.data?.signature;
-            console.log('✅ Transaction successful! Signature:', signature);
-            console.log(`📊 Sent ${amount} ${tokenType.toUpperCase()} to ${recipientAddress}`);
+            txSignature = signatureResponse.signature || signatureResponse.data?.signature;
+        }
+
+        if (txSignature) {
+            simpleLog(`✅ USDC transfer successful!`);
+            simpleLog(`💰 Sent ${amount} USDC to ${recipientAddress}`);
+            simpleLog(`🔗 View transaction: ${getExplorerUrl(txSignature)}`);
+            
+            debugLog('✅ Transaction successful! Signature:', txSignature);
+            debugLog(`📊 Sent ${amount} USDC to ${recipientAddress}`);
+            if (signatureResponse.confirmed_at) {
+                debugLog(`⏰ Confirmed at: ${signatureResponse.confirmed_at}`);
+            }
         } else {
-            console.log('Transaction submitted successfully, but the response format is unexpected.');
-            console.log('Received response:', signatureResponse);
+            console.log('✅ Transaction submitted successfully, but signature format is unexpected.');
+            if (DEBUG_MODE) {
+                console.log('Received response:', signatureResponse);
+            }
         }
 
     } catch (error) {
-        console.error('Transfer failed:', error);
-        console.error('Error details:', error);
+        console.error('❌ USDC transfer failed:', error);
+        if (DEBUG_MODE) {
+            console.error('Error details:', error);
+        }
     }
 }
 
@@ -354,23 +448,35 @@ async function transferSOLArbitrary() {
         return;
     }
 
-    console.log('🔐 Session Info:');
-    console.log(`  User Session Keys: ${Object.keys(userSession)}`);
-    console.log(`  Session Secrets Present: ${!!sessionSecrets}`);
-    if (userSession.grid_user_id) console.log(`  Grid User ID: ${userSession.grid_user_id}`);
-    if (userSession.smart_account_address) console.log(`  Smart Account: ${userSession.smart_account_address}`);
-    if (userSession.address) console.log(`  Address: ${userSession.address}`);
+    if (DEBUG_MODE) {
+        console.log('🔐 Session Info:');
+        console.log(`  User Session Keys: ${Object.keys(userSession)}`);
+        console.log(`  Session Secrets Present: ${!!sessionSecrets}`);
+        if (userSession.grid_user_id) console.log(`  Grid User ID: ${userSession.grid_user_id}`);
+        if (userSession.smart_account_address) console.log(`  Smart Account: ${userSession.smart_account_address}`);
+        if (userSession.address) console.log(`  Address: ${userSession.address}`);
+    }
 
     const { recipientAddress, amount } = await inquirer.prompt([
         {
             type: 'input',
             name: 'recipientAddress',
             message: 'Enter the recipient\'s Solana address:',
+            validate: (input: string) => {
+                if (!input.trim()) return 'Please enter a recipient address';
+                if (!validateSolanaAddress(input.trim())) return 'Please enter a valid Solana address';
+                return true;
+            }
         },
         {
             type: 'input',
             name: 'amount',
             message: 'Enter the amount of SOL to send:',
+            validate: (input: string) => {
+                if (!input.trim()) return 'Please enter an amount';
+                const validation = validateAmount(input.trim(), 'SOL');
+                return validation.valid ? true : validation.error!;
+            }
         },
     ]);
 
@@ -382,28 +488,33 @@ async function transferSOLArbitrary() {
     }
     
     // Check if we have different address types
-    console.log('🏦 Address Analysis:');
-    if (userSession.smart_account_address) console.log(`  Smart Account: ${userSession.smart_account_address}`);
-    if (userSession.address) console.log(`  Regular Address: ${userSession.address}`);
-    console.log(`  Using Address: ${accountAddress}`);
+    if (DEBUG_MODE) {
+        console.log('🏦 Address Analysis:');
+        if (userSession.smart_account_address) console.log(`  Smart Account: ${userSession.smart_account_address}`);
+        if (userSession.address) console.log(`  Regular Address: ${userSession.address}`);
+        console.log(`  Using Address: ${accountAddress}`);
+    }
 
     try {
-        console.log('Creating arbitrary SOL transfer transaction...');
-        console.log('📊 Transaction Details:');
-        console.log(`  From: ${accountAddress}`);
-        console.log(`  To: ${recipientAddress}`);
-        console.log(`  Amount: ${amount} SOL`);
+        simpleLog('🔧 Creating SOL transfer transaction...');
+        debugLog('Creating arbitrary SOL transfer transaction...');
+        if (DEBUG_MODE) {
+            console.log('📊 Transaction Details:');
+            console.log(`  From: ${accountAddress}`);
+            console.log(`  To: ${recipientAddress}`);
+            console.log(`  Amount: ${amount} SOL`);
+        }
         
         // Step 1: Create raw Solana transaction (Grid account will handle fees internally)
         const fromPubkey = new PublicKey(accountAddress); // Grid smart account (source of funds)
         const toPubkey = new PublicKey(recipientAddress); // Destination
         const lamports = Math.floor(parseFloat(amount) * LAMPORTS_PER_SOL);
         
-        console.log('📊 Transaction Details:');
-        console.log(`  From (Grid Account): ${fromPubkey.toBase58()}`);
-        console.log(`  To: ${toPubkey.toBase58()}`);
-        console.log(`  Amount: ${lamports} lamports (${amount} SOL)`);
-        console.log(`  Fee Payer: Grid will handle internally`);
+        debugLog('📊 Transaction Details:');
+        debugLog(`  From (Grid Account): ${fromPubkey.toBase58()}`);
+        debugLog(`  To: ${toPubkey.toBase58()}`);
+        debugLog(`  Amount: ${lamports} lamports (${amount} SOL)`);
+        debugLog(`  Fee Payer: Grid will handle internally`);
 
         // Create the transfer instruction (Grid account sends to recipient)
         const transferInstruction = SystemProgram.transfer({
@@ -411,12 +522,13 @@ async function transferSOLArbitrary() {
             toPubkey,   // Recipient
             lamports,
         });
-        console.log('✅ Transfer instruction created');
+        debugLog('✅ Transfer instruction created');
 
         // Get recent blockhash from Solana network
-        console.log(`🔗 Fetching recent blockhash from ${GRID_ENVIRONMENT === 'sandbox' ? 'devnet' : 'mainnet-beta'}...`);
+        simpleLog('🔗 Preparing transaction...');
+        debugLog(`🔗 Fetching recent blockhash from ${GRID_ENVIRONMENT === 'sandbox' ? 'devnet' : 'mainnet-beta'}...`);
         const { blockhash } = await solanaConnection.getLatestBlockhash('finalized');
-        console.log(`  Blockhash: ${blockhash}`);
+        debugLog(`  Blockhash: ${blockhash}`);
         
         // CRITICAL: Grid account acts as both sender AND fee payer
         const transaction = new Transaction({
@@ -425,7 +537,7 @@ async function transferSOLArbitrary() {
         });
         
         transaction.add(transferInstruction);
-        console.log('✅ Transaction created with Grid account as fee payer');
+        debugLog('✅ Transaction created with Grid account as fee payer');
 
         // Serialize transaction to base64
         const serializedTransaction = transaction.serialize({
@@ -434,38 +546,41 @@ async function transferSOLArbitrary() {
         });
         const base64Transaction = serializedTransaction.toString('base64');
         
-        console.log('✅ Transaction serialized');
-        console.log(`📄 Base64 Transaction Length: ${base64Transaction.length}`);
+        debugLog('✅ Transaction serialized');
+        debugLog(`📄 Base64 Transaction Length: ${base64Transaction.length}`);
 
-        console.log('Raw transaction created, preparing with Grid SDK...');
+        debugLog('Raw transaction created, preparing with Grid SDK...');
 
         // Step 2: Prepare arbitrary transaction payload (simplified format)
         const rawTransactionPayload = {
             transaction: base64Transaction, // Just the base64 transaction, Grid handles the rest
         };
         
-        console.log('📦 Raw Transaction Payload:');
-        console.log(`  transaction length: ${rawTransactionPayload.transaction.length}`);
-        console.log(`  transaction (first 100 chars): ${rawTransactionPayload.transaction.substring(0, 100)}...`);
-        
-        // Log the actual transaction structure for debugging
-        console.log('🔍 Transaction Structure Analysis:');
-        console.log(`  Transaction Instructions: ${transaction.instructions.length}`);
-        console.log(`  Fee Payer: ${transaction.feePayer?.toBase58()}`);
-        console.log(`  Recent Blockhash: ${transaction.recentBlockhash}`);
-        transaction.instructions.forEach((instruction, index) => {
-            console.log(`  Instruction ${index}:`);
-            console.log(`    Program ID: ${instruction.programId.toBase58()}`);
-            console.log(`    Keys: ${instruction.keys.length} accounts`);
-            instruction.keys.forEach((key, keyIndex) => {
-                console.log(`      ${keyIndex}: ${key.pubkey.toBase58()} (${key.isSigner ? 'signer' : 'non-signer'}, ${key.isWritable ? 'writable' : 'readonly'})`);
+        if (DEBUG_MODE) {
+            console.log('📦 Raw Transaction Payload:');
+            console.log(`  transaction length: ${rawTransactionPayload.transaction.length}`);
+            console.log(`  transaction (first 100 chars): ${rawTransactionPayload.transaction.substring(0, 100)}...`);
+            
+            // Log the actual transaction structure for debugging
+            console.log('🔍 Transaction Structure Analysis:');
+            console.log(`  Transaction Instructions: ${transaction.instructions.length}`);
+            console.log(`  Fee Payer: ${transaction.feePayer?.toBase58()}`);
+            console.log(`  Recent Blockhash: ${transaction.recentBlockhash}`);
+            transaction.instructions.forEach((instruction, index) => {
+                console.log(`  Instruction ${index}:`);
+                console.log(`    Program ID: ${instruction.programId.toBase58()}`);
+                console.log(`    Keys: ${instruction.keys.length} accounts`);
+                instruction.keys.forEach((key, keyIndex) => {
+                    console.log(`      ${keyIndex}: ${key.pubkey.toBase58()} (${key.isSigner ? 'signer' : 'non-signer'}, ${key.isWritable ? 'writable' : 'readonly'})`);
+                });
             });
-        });
+        }
 
         // Step 3: Use Grid SDK's prepareArbitraryTransaction method
-        console.log('🔄 Calling prepareArbitraryTransaction...');
-        console.log(`  Account: ${accountAddress}`);
-        console.log(`  Payload: ${JSON.stringify(rawTransactionPayload, null, 2)}`);
+        simpleLog('🔄 Preparing transaction with Grid...');
+        debugLog('🔄 Calling prepareArbitraryTransaction...');
+        debugLog(`  Account: ${accountAddress}`);
+        debugLog(`  Payload: ${JSON.stringify(rawTransactionPayload, null, 2)}`);
         
         let prepareResponse;
         try {
@@ -474,23 +589,27 @@ async function transferSOLArbitrary() {
                 rawTransactionPayload
             );
         } catch (error: any) {
-            console.error('❌ prepareArbitraryTransaction failed:');
-            console.error(`  Error message: ${error.message}`);
-            console.error(`  Error code: ${error.code}`);
-            console.error(`  Error cause: ${error.cause}`);
-            console.error(`  Full error:`, error);
+            if (DEBUG_MODE) {
+                console.error('❌ prepareArbitraryTransaction failed:');
+                console.error(`  Error message: ${error.message}`);
+                console.error(`  Error code: ${error.code}`);
+                console.error(`  Error cause: ${error.cause}`);
+                console.error(`  Full error:`, error);
+            }
             throw error;
         }
 
-        console.log('📋 Prepare Response Details:');
-        console.log(`  Data exists: ${!!prepareResponse.data}`);
-        if (prepareResponse.error) {
-            console.log(`  Error: ${prepareResponse.error}`);
-        }
-        if (prepareResponse.data) {
-            console.log(`  Prepared payload keys: ${Object.keys(prepareResponse.data)}`);
-            if (prepareResponse.data.transaction) {
-                console.log(`  Prepared transaction length: ${prepareResponse.data.transaction.length}`);
+        if (DEBUG_MODE) {
+            console.log('📋 Prepare Response Details:');
+            console.log(`  Data exists: ${!!prepareResponse.data}`);
+            if (prepareResponse.error) {
+                console.log(`  Error: ${prepareResponse.error}`);
+            }
+            if (prepareResponse.data) {
+                console.log(`  Prepared payload keys: ${Object.keys(prepareResponse.data)}`);
+                if (prepareResponse.data.transaction) {
+                    console.log(`  Prepared transaction length: ${prepareResponse.data.transaction.length}`);
+                }
             }
         }
 
@@ -499,14 +618,17 @@ async function transferSOLArbitrary() {
         }
 
         const transactionPayload = prepareResponse.data;
-        console.log('✅ Transaction prepared successfully');
+        debugLog('✅ Transaction prepared successfully');
         
         // Step 4: Execute transaction using signAndSend method with Grid's prepared payload
-        console.log('📤 Executing transaction with Grid SDK...');
-        console.log('🔧 Session details:');
-        console.log(`  sessionSecrets present: ${!!sessionSecrets}`);
-        console.log(`  userSession keys: ${Object.keys(userSession)}`);
-        console.log(`  authentication present: ${!!userSession.authentication}`);
+        simpleLog('📤 Executing SOL transaction...');
+        debugLog('📤 Executing transaction with Grid SDK...');
+        if (DEBUG_MODE) {
+            console.log('🔧 Session details:');
+            console.log(`  sessionSecrets present: ${!!sessionSecrets}`);
+            console.log(`  userSession keys: ${Object.keys(userSession)}`);
+            console.log(`  authentication present: ${!!userSession.authentication}`);
+        }
         
         let executedTx;
         try {
@@ -517,32 +639,44 @@ async function transferSOLArbitrary() {
                 address: accountAddress
             });
         } catch (error: any) {
-            console.error('❌ signAndSend failed:');
-            console.error(`  Error message: ${error.message}`);
-            console.error(`  Error code: ${error.code}`);
-            console.error(`  Error cause: ${error.cause}`);
-            console.error(`  Full error:`, error);
+            if (DEBUG_MODE) {
+                console.error('❌ signAndSend failed:');
+                console.error(`  Error message: ${error.message}`);
+                console.error(`  Error code: ${error.code}`);
+                console.error(`  Error cause: ${error.cause}`);
+                console.error(`  Full error:`, error);
+            }
             throw error;
         }
 
         // Handle different response formats
+        let txSignature: string | null = null;
+        
         if (executedTx && executedTx.signature) {
-            console.log('✅ Arbitrary transaction successful! Signature:', executedTx.signature);
-            console.log(`📊 Sent ${amount} SOL to ${recipientAddress}`);
-            console.log('🔗 View transaction:', `https://explorer.solana.com/tx/${executedTx.signature}?cluster=${GRID_ENVIRONMENT === 'sandbox' ? 'devnet' : 'mainnet-beta'}`);
+            txSignature = executedTx.signature;
         } else if (executedTx && (executedTx.transaction_signature || executedTx.data?.signature)) {
-            const signature = executedTx.transaction_signature || executedTx.data?.signature;
-            console.log('✅ Arbitrary transaction successful! Signature:', signature);
-            console.log(`📊 Sent ${amount} SOL to ${recipientAddress}`);
-            console.log('🔗 View transaction:', `https://explorer.solana.com/tx/${signature}?cluster=${GRID_ENVIRONMENT === 'sandbox' ? 'devnet' : 'mainnet-beta'}`);
+            txSignature = executedTx.transaction_signature || executedTx.data?.signature;
+        }
+
+        if (txSignature) {
+            simpleLog(`✅ SOL transfer successful!`);
+            simpleLog(`💰 Sent ${amount} SOL to ${recipientAddress}`);
+            simpleLog(`🔗 View transaction: ${getExplorerUrl(txSignature)}`);
+            
+            debugLog('✅ Arbitrary transaction successful! Signature:', txSignature);
+            debugLog(`📊 Sent ${amount} SOL to ${recipientAddress}`);
         } else {
-            console.log('Transaction submitted successfully, but the response format is unexpected.');
-            console.log('Received response:', executedTx);
+            console.log('✅ Transaction submitted successfully, but signature format is unexpected.');
+            if (DEBUG_MODE) {
+                console.log('Received response:', executedTx);
+            }
         }
 
     } catch (error) {
-        console.error('Arbitrary SOL transfer failed:', error);
-        console.error('Error details:', error);
+        console.error('❌ SOL transfer failed:', error);
+        if (DEBUG_MODE) {
+            console.error('Error details:', error);
+        }
     }
 }
 
@@ -558,7 +692,7 @@ async function mainMenu() {
             choices: [
                 { name: 'Login or Register', value: 'login' },
                 { name: 'Check Balance', value: 'balance' },
-                { name: 'Transfer Tokens (USDC/SOL)', value: 'transfer' },
+                { name: 'Transfer USDC', value: 'transfer' },
                 { name: 'Transfer SOL (Arbitrary Transaction)', value: 'arbitrarySOL' },
                 { name: 'Exit', value: 'exit' },
             ],
