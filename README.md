@@ -63,6 +63,8 @@ A command-line interface for interacting with the [Grid SDK from Squads](https:/
 2. Get test funds from faucets (see below)
 3. Only switch to production when ready for real transactions
 
+Contributors to this open-source CLI are not responsible for lost funds. Use at your own risk.
+
 ### Test Token Faucets
 
 For testing in sandbox environment:
